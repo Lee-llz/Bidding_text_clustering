@@ -1,0 +1,348 @@
+# !/usr/bin/python
+# -*- coding:utf-8 -*-
+# Author:llz
+# Date:2019-11-05
+#Email:976451619@qq.com
+
+
+import numpy as np
+import pandas as pd
+import os
+import time
+import sys
+import matplotlib as mpl
+import matplotlib.pyplot as plt
+import sklearn
+import jieba
+import jieba.analyse
+from gensim.models import word2vec
+from gensim.models import Word2Vec
+import multiprocessing
+import re
+from sklearn.feature_extraction.text import TfidfTransformer
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.feature_extraction.text import CountVectorizer
+from sklearn import metrics
+from sklearn.cluster import KMeans
+
+def read_csv(lujing,name):
+    f1=open(lujing + name+'.csv',encoding = 'utf-8')
+    data =pd.read_csv(f1)
+    f1.close()
+    return data
+
+def fill_nan(df_js):
+    #按列填充空值
+    col_list = df_js.columns.tolist()
+    for col in col_list:
+        df_js[col].fillna(value = '',inplace=True)
+    print('填充空值成功！')
+    return df_js
+
+
+jieba.load_userdict("./data_cx/userdict.txt")
+stopwords = pd.read_csv("./data_cx/stopwords.txt")
+
+def fenci(content):
+    '''
+    输入：列表，元素为字符串
+    输出：列表，元素也为列表
+    '''
+    content_s = []
+    pattern = re.compile(r'[\u4e00-\u9fa5]{1,}', re.S)
+    for line in content:
+        try:
+            line = ' '.join(pattern.findall(line))
+            current_segment = jieba.cut(line)
+            content_s.append(current_segment)
+        except:
+            print('分词错误',end=',')
+            continue
+    df_content = pd.DataFrame({'content_s': content_s})
+
+    def drop_stopwords(contents, stopwords):
+        # 去掉停用词
+        contents_clean = []
+        for line in contents:
+            line_clean = []
+            for word in line:
+                if word in stopwords:
+                    continue
+                line_clean.append(word)
+            contents_clean.append(line_clean)
+        return contents_clean
+
+    # 对df_content增加去掉停用词的字段contents_clean
+    contents = df_content.content_s.values.tolist()
+    df_stopwords = pd.read_csv("./data_cx/stopwords.txt")
+    stopwords = df_stopwords.stopword.values.tolist()
+    contents_clean = drop_stopwords(contents, stopwords)
+
+    return contents_clean
+
+def tiqu_tz(fenci_list):
+    tz_list = []
+    for fenci_h in fenci_list:
+        tz_h = []
+        for ci in fenci_h:
+            if len(ci)!=1:
+                tz_h.extend([ci])
+        tz_s = ' '.join(tz_h)
+        tz_list.extend([tz_s])
+    return tz_list
+
+
+def add_columns_tz(df_js1):
+    #生成  名称与正文分词
+    df_js1['名称与正文分词'] = ''
+    #print(df_js1.groupby('发布日期').count())
+
+    date_s = df_js1['release_date'].unique().tolist()
+    print('有%d天'%len(date_s))
+    for date in date_s:
+        print(date, end=',')
+        con1 = df_js1['release_date'] == date
+        pp_list_1 = df_js1['名称与正文'][con1].values.tolist()
+        fenci_list = fenci(pp_list_1)
+        tz_list = tiqu_tz(fenci_list)
+        df_tz = pd.DataFrame({'tz_list': tz_list})
+        df_js1['名称与正文分词'][con1] = df_tz[['tz_list']].values
+
+    return df_js1
+
+def add_mc_zw(data1):
+    #生成  名称与正文
+    data1['名称与正文'] = ''
+    data1['content_text'] = data1['content_text'].astype(str)
+    data1['project_name'] = data1['project_name'].astype(str)
+    zw_list = data1['content_text'].values.tolist()
+    mc_list = data1['project_name'].values.tolist()
+    mc_zw_list = data1['名称与正文'].values.tolist()
+    key_list = data1['key_info'].values.tolist()
+    for i in range(0,len(mc_zw_list)):
+        #mc_zw_list[i] = mc_list[i] +' '+mc_list[i] +' '+ zw_list[i]
+        mc_zw_list[i] = mc_list[i]+' '+key_list[i] +' '+key_list[i]
+    df_t = pd.DataFrame({'list':mc_zw_list})
+    data1['名称与正文'] = df_t['list'].values
+    return data1
+
+
+#提取关键词
+def get_tfidf_word(data1, num):
+    # 提取每条数据关键词
+    data1['TF-IDF关键词'] = ''
+
+    # 计算每篇文章的TF-IDF关键词，前20个进行拼接
+    wordslist = data1['名称与正文分词'].values.tolist()
+    gjc_list = data1['TF-IDF关键词'].values.tolist()
+
+    # fit_transform()，学习词语词典并返回文档矩阵，矩阵中元素为词语出现的次数。
+    # get_feature_names()，获取特征整数索引到特征名称映射的数组，即文档中所有关键字的数组。
+    vectorizer = CountVectorizer()
+    word_frequence = vectorizer.fit_transform(wordslist)
+    words = vectorizer.get_feature_names()
+
+    # 而TfidfTransformer类用于统计每个词语的TF-IDF值。
+    transformer = TfidfTransformer()
+    tfidf = transformer.fit_transform(word_frequence)
+    weight = tfidf.toarray()
+
+    for j in range(0, len(weight)):
+        if j % 100 == 0:
+            print(j, end=',')
+        # 根据权重对索引降序,索引为总词库（words）对应索引
+        w = weight[j]
+        loc = np.argsort(-w)
+        # 提取num个关键词,与对应权重
+        key_words = ''
+        for i in range(0, num):
+            key_word_i = words[loc[i]]
+            key_word_i_weight = w[loc[i]]
+            # 拼接关键词
+            try:
+                if key_word_i_weight > 0.001:
+                    key_words = key_words + key_word_i + ' '
+            except:
+                pass
+        gjc_list[j] = key_words.rstrip(' ')
+
+    df_t = pd.DataFrame({'list': gjc_list})
+    data1['TF-IDF关键词'] = df_t['list'].values
+    return data1
+
+# 转词向量
+def getVector_v3(cutWords, word2vec_model):
+    # 由一片文章的分词列表、词向量模型，计算词向量
+    vector_list = [word2vec_model[k] for k in cutWords if k in word2vec_model]
+    cutWord_vector = np.array(vector_list).mean(axis=0)
+    return cutWord_vector
+
+
+def add_vector_col(data1, word2vec_model):
+    # 由分词字段，计算词向量
+    data1['词向量'] = ''
+    data1['TF-IDF关键词'] = data1['TF-IDF关键词'].astype(str)
+    cutWords_list = data1['TF-IDF关键词'].values.tolist()
+    cxl_list = data1['词向量'].values.tolist()
+
+    print('开始计算词向量，一共有%d条:' % len(cutWords_list))
+    for i in range(0, len(cutWords_list)):
+        if i % 100 == 0:
+            print(i, end=',')
+        cutWords = cutWords_list[i].split(' ')
+        cxl_list[i] = getVector_v3(cutWords, word2vec_model)
+
+    df_t = pd.DataFrame({'list': cxl_list})
+    data1['词向量'] = df_t['list'].values
+    return data1
+
+#聚类与生成主题
+def clustering_model(data1, jl_list):
+    # KMeans聚类
+    cxl_list = data1['词向量'].values.tolist()
+    X = np.array(cxl_list)
+    scores = []
+    for k in jl_list:
+        print(k, end=',')
+        labels = KMeans(n_clusters=k, n_jobs=4).fit(X).labels_
+        data1['聚类'] = labels
+        # 轮廓系数得分
+        score = metrics.silhouette_score(X, labels)
+        scores.append(score)
+    # data1.to_excel('./聚类.xlsx',index = False)
+    print(scores)
+    return data1
+
+
+def get_theme(data1):
+    # 生成主题
+
+    # 生成聚类公告数量
+    data_bb = data1.pivot_table(index=['聚类'], values=['TF-IDF关键词'],
+                                aggfunc={'TF-IDF关键词': len})
+    data_bb.reset_index(inplace=True)
+    data_bb.rename(columns={'TF-IDF关键词': '聚类公告数量'}, inplace=True)
+
+    data_gp = data1.groupby(['聚类'])[['TF-IDF关键词']].sum()
+    data_gp.reset_index(inplace=True)
+    # 提取同类关键词，生成主题
+    data_gp.rename(columns={'TF-IDF关键词': '名称与正文分词'}, inplace=True)
+    data_gp = get_tfidf_word(data_gp, num=5)
+    data_gp.rename(columns={'TF-IDF关键词': '主题'}, inplace=True)
+
+    # 合并公告数量与主题
+    data_tj = data_bb.merge(data_gp[['聚类', '主题']], how='left', left_on='聚类', right_on='聚类')
+
+    return data_tj
+
+# 训练模型
+data1 = read_csv('./data1_s/','样本去重')
+data1 = fill_nan(data1)
+
+print('开始拼接名称与正文...')
+data1 = add_mc_zw(data1)
+print('名称与正文分词......')
+data1 = add_columns_tz(data1)
+data1['名称与正文分词'] = data1['特征'].copy()
+
+data1 = data1[data1['名称与正文分词']!='']
+data1.reset_index(inplace=True,drop=True)
+data1['名称与正文分词'] = data1['名称与正文分词'].astype(str)
+cutWords_list = data1['名称与正文分词'].values.tolist()
+for i in range(0,len(cutWords_list)):
+    if i%100==0:
+        print(i,end=',')
+    cutWords_list[i] = cutWords_list[i].replace('  ',' ').split(' ')
+#训练模型
+# sg=0 对应CBOW算法。sg=1则采用skip-gram算法。skip-gram （训练速度慢，对罕见字有效），CBOW（训练速度快）。
+#size：指特征向量的维度，推荐值为几十到几百。
+#window：表示当前词与预测词在一个句子中的最大距离。Skip-gram通常选择10左右，CBOW通常选择5左右。
+#词频少于min_count次数的单词会被丢弃掉, 默认值为5
+#workers：用于控制训练的并行数。
+# hs: 如果为1则会采用hierarchica·softmax技巧。如果设置为0（默认），则使用negative sampling。
+#训练方法：Hierarchical Softmax（对罕见字有利），Negative Sampling（对常见字和低维向量有利）；
+word2vec_model = Word2Vec(cutWords_list,workers=multiprocessing.cpu_count(), size=300, window=7,iter=20, min_count=3, sg=0)
+
+#保存词向量模型
+word2vec_model.save('./data1_s/model_zb0827.w2v')
+#word2vec_model.wv.most_similar('打架')
+
+# 计算最相关词语
+word2vec_model.wv.most_similar('通信')
+
+# 聚类
+data1 = read_csv('./data1_s/','样本去重')
+data1 = fill_nan(data1)
+
+data1['content_text'] = data1['特征'].copy()
+print('开始拼接名称与正文...')
+data1 = add_mc_zw(data1)
+print('名称与正文分词......')
+data1 = add_columns_tz(data1)
+
+
+data1 = data1[data1['名称与正文分词']!='']
+data1.reset_index(inplace=True,drop=True)
+
+#导入模型
+word2vec_model = Word2Vec.load('./data1_s/model_zb0827.w2v')
+word2vec_model.wv.most_similar('手机',topn=20)
+
+print('开始提取TF-IDF关键词')
+data1 = get_tfidf_word(data1,num=15)
+
+print('开始计算词向量')
+data1 = add_vector_col(data1,word2vec_model)
+data1 = data1[data1['词向量'].notnull()]
+
+
+print('一共有%d条。'%len(data1))
+print('开始聚类')
+data1 = clustering_model(data1,[150])
+
+print('开始生成主题')
+data_tj = get_theme(data1)
+data1 = data1.merge(data_tj[['聚类','聚类公告数量','主题']],how = 'left',left_on = '聚类', right_on = '聚类')
+
+data1.columns
+
+data1[['名称与正文分词','主题','聚类','project_name']][data1['聚类']==2]
+#保存数据
+try:
+    data1.drop(['content_text','名称与正文', '名称与正文分词','词向量'],axis=1,inplace=True)
+except:
+    pass
+data1.to_excel('./data1_s/吉林去重与聚类.xlsx',)
+# def make_vector_df(data1):
+#     #将词向量转化为df
+#     cxl_list = data1['词向量'].values.tolist()
+#     df_all = pd.DataFrame(cxl_list[0]).T
+#     for i in range(1,len(cxl_list)):
+#         df_t = pd.DataFrame(cxl_list[i]).T
+#         df_all = df_all.append(df_t, ignore_index=True)
+#     return df_all
+
+# import jieba.analyse
+# def get_theme_word(data1):
+#     data1['主题80'] = ''
+#     label_list = data1['聚类80'].unique().tolist()
+#     for label in label_list:
+#         print(label,end=',')
+#         con = data1['聚类80']==label
+#         wordslist = data1['TF-IDF关键词'][con].values.tolist()
+#         words_str = ' '.join(wordslist)
+#         theme = " ".join(jieba.analyse.extract_tags(words_str, topK=20, withWeight=False))
+#         data1['主题80'][con] = theme
+#     return data1
+# data1 = get_theme_word(data1)
+
+# from sklearn.cluster import DBSCAN
+# def DBSCAN_model(data1):
+#     #DBSCAN聚类
+#     cxl_list = data1['词向量'].values.tolist()
+#     X = np.array(cxl_list)
+#     labels = DBSCAN(eps=2.5, min_samples=5).fit(X).labels_
+#     data1['DBSCAN聚类'] = labels
+#     return data1
+
+# data1 = DBSCAN_model(data1)
